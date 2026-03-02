@@ -7,3 +7,4 @@ requests>=2.31
 sentence-transformers>=2.7
 rich>=13.7
 orjson>=3.9
+swanlab>=0.2.5

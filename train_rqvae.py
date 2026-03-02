@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from typing import Tuple, List, Dict
+import swanlab
 
 
 CONFIG = {
@@ -265,9 +266,9 @@ def kmeans_init_codebooks(
     with torch.inference_mode():
         for batch in loader:
             z = model.encoder(batch.to(device))
-            all_z.append(z)
-    
-    all_z = np.concatenate(all_z, axis=0).cpu().numpy()   # [N, latent_dim]
+            all_z.append(z.cpu().numpy())
+
+    all_z = np.concatenate(all_z, axis=0)   # [N, latent_dim]
     
     # 逐层初始化，在残差上做 KMeans
     residual = all_z.copy()
@@ -315,6 +316,9 @@ def train_rqvae(config:dict = CONFIG):
     device = config['device']
     output_dir = Path(config['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 初始化 SwanLab 记录
+    swanlab.init(project="rqvae", name="train-rqvae", config=config)
     
     print(f"Using device: {device}")
     
@@ -392,6 +396,18 @@ def train_rqvae(config:dict = CONFIG):
             f"collision={val_metrics['collision_rate']:.2%} "
             f"util={val_metrics['utilization']:.1%}"
         )
+
+        # 记录指标到 SwanLab
+        current_lr = optimizer.param_groups[0]['lr']
+        swanlab.log({
+            "train/loss": train_metrics['loss'],
+            "train/recon": train_metrics['recon_loss'],
+            "train/vq": train_metrics['vq_loss'],
+            "val/loss": val_metrics['loss'],
+            "val/collision_rate": val_metrics['collision_rate'],
+            "val/utilization": val_metrics['utilization'],
+            "lr": current_lr,
+        }, step=epoch)
         
         # Check early stopping
         if val_metrics['loss'] < best_val_loss:
