@@ -96,7 +96,7 @@ class SeqTrainDataset(Dataset):
         加 offset 后 = [48, 15, 91]           （避免和特殊token冲突）
         """
         codes = self.semantic_ids[item_id]
-        return [code2token[c] for c in codes]
+        return [code2token(c) for c in codes]
     
     def __len__(self):
         return len(self.samples)
@@ -135,7 +135,7 @@ class SeqTrainDataset(Dataset):
             "input_ids": torch.LongTensor(input_ids),    # [max_tokens]
             "attention_mask": torch.LongTensor(attention_mask), # [max_tokens]
             "target_ids": torch.LongTensor(target_tokens),  # [num_rq_layers]
-            "target_item": torch.LongTensor(target_item)    # [1,]  评估用
+            "target_item": torch.tensor(target_item, dtype=torch.long)    # 标量, 评估用
         }
 
     @property
@@ -169,12 +169,12 @@ class SeqEvalDataset(Dataset):
                                       semantic_ids,
                                       max_seq_len,
                                       num_rq_layers)
-        
-        def __len__(self) -> int:
-            return len(self._inner)
-        
-        def __getitem__(self, idx:int) -> Dict:
-            return self._inner[idx]
+
+    def __len__(self) -> int:
+        return len(self._inner)
+
+    def __getitem__(self, idx:int) -> Dict:
+        return self._inner[idx]
     
     
 
