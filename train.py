@@ -4,6 +4,7 @@ import pickle
 from pathlib import Path
 import torch
 import numpy as np
+import swanlab
 from tqdm.auto import tqdm
 from pathlib import Path
 import torch.nn.functional as F
@@ -184,6 +185,13 @@ def train_rec(config:dict = CONFIG):
         base_lr=config['lr']
     )
     
+    # 初始化 SwanLab
+    swanlab.init(
+        project="Generated_Retrieval",
+        experiment_name="CausalTransformer",
+        config=config
+    )
+
     print("Start Training..")
     
     best_val_ndcg = 0.0
@@ -223,6 +231,13 @@ def train_rec(config:dict = CONFIG):
             'lr': current_lr,
             **{f"val_{k}": v for k, v in val_metrics.items()}
         })
+
+        # SwanLab 记录
+        swanlab.log({
+            'train/loss': train_loss,
+            'train/lr': current_lr,
+            **{f'val/{k}': v for k, v in val_metrics.items()}
+        }, step=epoch)
         
         # Check Early Stopping
         val_ndcg = val_metrics[f"NDCG@{monitor_k}"]
@@ -264,6 +279,10 @@ def train_rec(config:dict = CONFIG):
     
     print('\nFinal Results:')
     print_metrics(test_metrics, config['topk'], prefix='Test')
+
+    # 记录测试集最终指标
+    swanlab.log({f'test/{k}': v for k, v in test_metrics.items()})
+    swanlab.finish()
     
     results = {
         'history': history,
