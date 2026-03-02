@@ -99,7 +99,7 @@ class SeqTrainDataset(Dataset):
         return [code2token[c] for c in codes]
     
     def __len__(self):
-        return len(self.sample)
+        return len(self.samples)
     
     def __getitem__(self, idx:int) -> dict:
         history, target_item = self.samples[idx]
