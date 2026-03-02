@@ -27,13 +27,13 @@ CONFIG = {
     "codebook_size":  256,
     "num_rq_layers":  3,
     "decay":          0.99,
-    "commitment_weight": 0.25,
+    "commitment_weight": 0.10,
     "dropout":        0.1,
     
     # 训练
     "batch_size":     512,
     "epochs":         100,
-    "lr":             1e-3,
+    "lr":             3e-4,
     "weight_decay":   1e-4,
     "val_ratio":      0.1,
     "patience":       10,     # 早停：val loss 不下降多少 epoch 就停

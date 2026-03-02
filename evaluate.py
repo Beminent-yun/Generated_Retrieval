@@ -120,6 +120,9 @@ def evaluate(
         {"HR@1": 0.032, "NDCG@1": 0.032,
        "HR@5": 0.098, "NDCG@5": 0.071, ...}
     """
+    
+    print(f"Using {device}..")
+    
     model.eval()
     
     # 初始化累计指标
