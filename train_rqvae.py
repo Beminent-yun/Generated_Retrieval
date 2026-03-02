@@ -238,6 +238,78 @@ def generate_semantic_ids(
     return semantic_ids
 
 
+def kmeans_init_codebooks(
+    model:RQVAE,
+    embeddings:np.ndarray,
+    device:str
+):
+    """
+    用KMeans初始化每一层的码本
+    关键点：第 l 层在第 l-1 层的残差上做KMeans，不实在原始embedding上做
+    
+    原因：
+      第0层码本负责捕捉粗粒度语义
+      第1层码本负责捕捉第0层留下的残差
+      如果都在原始 embedding 上做 KMeans
+      三层码本会学到重复的信息
+    """
+    from sklearn.cluster import KMeans, MiniBatchKMeans
+    print("\nKMeans初始化码本..")
+    model.eval()
+    
+    all_z = []
+    dataset = ItemEmbeddingDataset(embeddings)
+    loader = DataLoader(dataset,
+                        batch_size=1024,
+                        shuffle=False)
+    with torch.inference_mode():
+        for batch in loader:
+            z = model.encoder(batch.to(device))
+            all_z.append(z)
+    
+    all_z = np.concatenate(all_z, axis=0).cpu().numpy()   # [N, latent_dim]
+    
+    # 逐层初始化，在残差上做 KMeans
+    residual = all_z.copy()
+
+    for layer_idx, quantizer in enumerate(model.rq.quantizers):
+        K = quantizer.codebook_size
+        print(f"  第{layer_idx}层（K={K}）...")
+        # KMeans
+        n = len(residual)
+        if n > 100000:
+            km = MiniBatchKMeans(
+                n_clusters=K, n_init=3,
+                batch_size=4096, random_state=42
+            )
+        else:
+            km = KMeans(
+                n_clusters=K, n_init=10, random_state=42
+            )
+        km.fit(residual)
+        centers = torch.FloatTensor(km.cluster_centers_).to(device)
+        
+        # 写入码本
+        with torch.inference_mode():
+            quantizer.codebook.copy_(centers)
+            quantizer.ema_weight.copy_(centers)
+            count = torch.FloatTensor(
+                np.bincount(km.labels_, minlength=K).astype(np.float32)
+            ).to(device)
+            quantizer.ema_count.copy_(count.clamp(min=1))
+
+        # 计算残差
+        labels = km.labels_
+        quantized = km.cluster_centers_[labels]
+        residual = residual - quantized
+        
+        residual_norm = np.linalg.norm(residual, axis=-1).mean()
+        utilization = (np.bincount(labels, minlength=K) > 0).mean()
+        print(f"    利用率: {utilization:.1%}, 残差均值: {residual_norm:.4f}")
+    
+    print("KMeans 初始化完成\n")
+
+
 def train_rqvae(config:dict = CONFIG):
     torch.manual_seed(config['seed'])
     device = config['device']
@@ -282,6 +354,9 @@ def train_rqvae(config:dict = CONFIG):
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {total_params}")
     
+    # KMeans 初始化码本
+    kmeans_init_codebooks(model, embeddings, device)
+    
     print("Start training ..")
     optimizer = torch.optim.AdamW(model.parameters(), 
                                   lr=config['lr'],
@@ -295,7 +370,7 @@ def train_rqvae(config:dict = CONFIG):
     patience_counter = 0
     best_model_path = output_dir/'best_model.pt'
     
-    for epoch in tqdm(range(1, config['epochs'] + 1), desc='Training RQ-VAE'):
+    for epoch in range(1, config['epochs'] + 1):
         # Train
         train_metrics = train_one_epoch(model,
                                         train_loader,
