@@ -163,56 +163,54 @@ class CausalTransformer(nn.Module):
                       )->torch.tensor:
         """
         Beam Search Generate Semantic ID
+        优化：将所有 beam 展平为 [B*beam_size, ...] 批量做单次 forward，
+             相比逐 beam 循环减少约 beam_size 倍的 forward 调用次数。
         Returns:
             - Semantic ID: [B, beam_size, L]   Top-{beam_size} candidated semantic ids, sorted by probability
         """
         self.eval()
         B, T = input_ids.shape
         device = input_ids.device
-        L = num_rq_layers
-        
-        # 初始Logits
+        L = self.num_rq_layers
+
+        # ── Step 0：初始 forward，获取第一个 token 的分布 ──────────────
         logits = self(input_ids, attention_mask)    # [B, T, vocab_size]
-        last_logits = logits[:, -1, :]  # [B, V]    预测的第1个id
-        
-        # 取 top-{beam_size} 个候选
+        last_logits = logits[:, -1, :]              # [B, V]
+
         top_probs, top_ids = torch.topk(
             F.log_softmax(last_logits, dim=-1), beam_size, dim=-1
         )   # [B, beam_size]
-        
-        # beams: [B, beam_size, L]  当前已经生成的token序列
+
+        # beams: [B, beam_size, L]
         beams = torch.zeros((B, beam_size, L), dtype=torch.long, device=device)
-        beams_scores = top_probs
+        beams_scores = top_probs        # [B, beam_size]
         beams[:, :, 0] = top_ids
-        
-        # 逐步生成后续 token (L-1 步)
+
+        # ── 预先将 input_ids/mask 扩展到所有 beam ────────────────────
+        # [B, T] -> [B*beam_size, T]
+        exp_input = input_ids.unsqueeze(1).expand(-1, beam_size, -1).reshape(B * beam_size, T)
+        exp_mask  = attention_mask.unsqueeze(1).expand(-1, beam_size, -1).reshape(B * beam_size, T)
+
+        # ── Step 1..L-1：每步只做 1 次批量 forward ────────────────────
         for step in range(1, L):
-            # 对每个beam，扩展输入序列
-            # 简化：取最高分beam继续拓展(greedy per-beam)
-            for b in range(beam_size):
-                ext_ids = torch.cat([
-                    input_ids,
-                    beams[:, b, :step]
-                ], dim=1)   # [B, T+step]
-                
-                ext_mask = torch.cat([
-                    attention_mask,
-                    torch.ones(B, step, dtype=torch.long, device=device)
-                ], dim=1)
-                
-                logits_b = self(ext_ids, ext_mask)  # [B, T+step, vocab_size]
-                next_logit = logits_b[:, -1, :] # [B, V]
-                next_log_prob = F.log_softmax(next_logit, dim=-1)
-                
-                # 取最佳 token
-                best_prob, best_id = next_log_prob.max(dim=-1)  # [B,]
-                beams[:, b, step] = best_id
-                beams_scores[:, b] += best_prob
-                
-        # 按分数排序
-        sorted_idx = beams_scores.argsort(dim=-1, descending=True)  # [B, beam_size]
-        beams = beams.gather(
-            1, sorted_idx.unsqueeze(-1).expand(-1, -1, L)
-        )
-        
+            # 当前已生成的 tokens: [B, beam_size, step] -> [B*beam_size, step]
+            curr_flat = beams[:, :, :step].reshape(B * beam_size, step)
+
+            ext_ids = torch.cat([exp_input, curr_flat], dim=1)          # [B*beam_size, T+step]
+            ext_mask = torch.cat([
+                exp_mask,
+                torch.ones(B * beam_size, step, dtype=torch.long, device=device)
+            ], dim=1)                                                    # [B*beam_size, T+step]
+
+            logits_all = self(ext_ids, ext_mask)                        # [B*beam_size, T+step, V]
+            next_log_prob = F.log_softmax(logits_all[:, -1, :], dim=-1) # [B*beam_size, V]
+
+            best_prob, best_id = next_log_prob.max(dim=-1)              # [B*beam_size,]
+            beams[:, :, step]  = best_id.reshape(B, beam_size)
+            beams_scores       = beams_scores + best_prob.reshape(B, beam_size)
+
+        # ── 按分数降序排列 ─────────────────────────────────────────────
+        sorted_idx = beams_scores.argsort(dim=-1, descending=True)      # [B, beam_size]
+        beams = beams.gather(1, sorted_idx.unsqueeze(-1).expand(-1, -1, L))
+
         return beams
