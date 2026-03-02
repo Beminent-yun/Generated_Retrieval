@@ -318,7 +318,7 @@ def train_rqvae(config:dict = CONFIG):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 初始化 SwanLab 记录
-    swanlab.init(project="rqvae", name="train-rqvae", config=config)
+    swanlab.init(project="rqvae", name=f"train-rqvae-lr={config['lr']}-cw={config['commitment_weight']}", config=config)
     
     print(f"Using device: {device}")
     

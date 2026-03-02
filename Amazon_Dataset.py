@@ -240,6 +240,12 @@ def get_rec_loaders(
     注意 val 和 test 的历史来源：
       都用 data["train"] 作为历史
       不能用 data["val"] 更新历史（评估协议）
+      
+    Returns:
+        - train_loader: DataLoader
+        - val_loader: DataLoader
+        - test_loader: DataLoader
+        - vocab_size: int
     """
     common_kwargs = dict(
         semantic_ids=semantic_ids,

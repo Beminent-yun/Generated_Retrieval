@@ -277,6 +277,15 @@ class RQVAE(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, input_dim)
         )
+        
+        self._init_weights()
+        
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
     
     def forward(self, x:torch.tensor)->torch.tensor:
         """
@@ -287,6 +296,7 @@ class RQVAE(nn.Module):
         x_recon = self.decoder(z_q) # [B, latent_dim] -> [B, input_dim]
         
         return x_recon, vq_loss, semantic_ids
+    
     
     def compute_loss(self, x_recon, x, vq_loss):
         
@@ -301,6 +311,7 @@ class RQVAE(nn.Module):
             "recon_loss": recon_loss,
             "vq_loss": vq_loss
         }
+    
     
     @torch.inference_mode()
     def generate_semantic_ids(self, x):
