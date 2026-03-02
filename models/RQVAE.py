@@ -203,7 +203,8 @@ class ResidualQuantizer(nn.Module):
         all_indices = []
         for quantizer in self.quantizers:
             z_q_i, indices_i, vq_loss_i = quantizer(residual)
-            residual -= z_q_i.detach()  # NOTE!
+            # avoid in-place on residual to keep autograd versions consistent
+            residual = residual - z_q_i.detach()
             total_loss += vq_loss_i
             all_indices.append(indices_i)   # [B,]
             z_q_total += z_q_i
