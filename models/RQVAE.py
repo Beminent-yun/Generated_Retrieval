@@ -207,7 +207,8 @@ class ResidualQuantizer(nn.Module):
             residual = residual - z_q_i.detach()
             total_loss += vq_loss_i
             all_indices.append(indices_i)   # [B,]
-            z_q_total += z_q_i
+            # avoid in-place accumulation on a tensor that participates in autograd
+            z_q_total = z_q_total + z_q_i
         all_indices = torch.stack(all_indices, dim=1)  # 拼接成[B, L]
         
         return z_q_total, total_loss, all_indices
