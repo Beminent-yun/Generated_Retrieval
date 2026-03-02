@@ -136,9 +136,9 @@ class VectorQuantizerEMA(nn.Module):
                 # EMA更新
                 self.ema_count = self.decay * self.ema_count + (1 - self.decay) * n_k
                 self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * sum_k
-                # 用EMA统计量更新码本
-                # Laplace 平滑防止 ema_count 过小
-                self.codebook = self.ema_weight / (self.ema_count + self.epsilon)
+                # 用EMA统计量更新码本；显式扩展维度避免广播形状歧义
+                # ema_count: [K] -> [K, 1] so division matches ema_weight [K, d]
+                self.codebook = self.ema_weight / (self.ema_count.unsqueeze(-1) + self.epsilon)
             
         # Calculate Weight
         # Commitment Loss: 让encoder的输出靠近码本(z靠近z_q)
