@@ -64,7 +64,7 @@ def print_metrics(
     
 
 def beam_to_candidate(
-    beams: torch.tensor,    # [batch_size, beam_size, L]
+    beams: torch.Tensor,    # [batch_size, beam_size, L]
     sid2item: Dict[tuple, List[int]],
     code_offset:int = 3
 )-> List[List[int]]:
@@ -236,16 +236,16 @@ def resolve_eval_amp_settings(device: str) -> tuple[bool, torch.dtype | None]:
 @torch.inference_mode()
 def generate_beam_constrained(
     model: CausalTransformer,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    user_ids: torch.Tensor,
+    input_ids: torch.tensor,
+    attention_mask: torch.tensor,
+    user_ids: torch.tensor,
     beam_size: int,
-    allowed_masks: list[torch.Tensor],
-    next_state_tables: list[torch.Tensor],
+    allowed_masks: list[torch.tensor],
+    next_state_tables: list[torch.tensor],
     beam_schedule: List[int] | None = None,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
+) -> torch.tensor:
     """
     基于有效 SID 前缀的约束 Beam Search。
     仅允许扩展到数据中存在的 semantic id 前缀，避免候选 tuple 大量无效。

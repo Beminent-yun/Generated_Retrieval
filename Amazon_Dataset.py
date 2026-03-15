@@ -346,8 +346,9 @@ def get_rec_loaders(
     推荐模型的 DataLoader
     
     注意 val 和 test 的历史来源：
-      都用 data["train"] 作为历史
-      不能用 data["val"] 更新历史（评估协议）
+      val 评估：历史 = data["train"]
+      test 评估：历史 = data["train"] + [data["val"]]
+      这样 test 更符合真实时序：预测最后一个 item 时，用户已经发生过 val 交互
       
     Returns:
         - train_loader: DataLoader
@@ -392,10 +393,12 @@ def get_rec_loaders(
         targets=data['val'],
         **common_kwargs
     )
-    # test测试集：历史=train序列，目标=test target
+    # test测试集：历史=train序列 + val item，目标=test target
     test_ds = SeqEvalDataset(
         user_histories={
-            u: data['train'][u] for u in data['test'] if u in data['train']
+            u: data['train'][u] + [data['val'][u]]
+            for u in data['test']
+            if u in data['train'] and u in data['val']
         },
         targets=data['test'],
         **common_kwargs

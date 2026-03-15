@@ -1,23 +1,58 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import math
+from models.Attention import CausalSelfAttention
 
 
-class PositionEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 512, dropout: float = 0.1):
+
+class FeedForward(nn.Module):
+    """
+    SwiGLU (SiLU/Swish Gated Linear Unit) -> 本质上是带门控的前馈层
+        SwiGLU(x) = Wdown( SiLU(Wgate x) * (Wup x) )
+        SiLU(x) = x * sigmoid(x)
+
+        普通 FFN：先扩维，再激活，再投回去
+        SwiGLU：先扩两路，一路当内容，一路当门，门控后再投回去
+            
+            |    -> Wup -----------\
+            x                        * -> Wdown -> out
+            |    -> Wgate -> SiLU -/
+
+    """
+    def __init__(self, d_model:int, dim_ffn:int, dropout_rate:float):
         super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(max_len).unsqueeze(1).float()
-        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer("pe", pe.unsqueeze(0))   # (1, max_len, d_model)
+        
+        self.up_proj = nn.Linear(d_model, dim_ffn, bias=False)  # 通常dim_ffn = 4*d_model
+        self.gate_proj = nn.Linear(d_model, dim_ffn, bias=False)
+        self.down_proj = nn.Linear(dim_ffn, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = F.silu(self.gate_proj(x)) * self.up_proj(x)
+        x = self.down_proj(x)
+        x = self.dropout(x)
+        return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model:int, num_head:int, dim_ffn:int, dropout_rate:float):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attention = CausalSelfAttention(d_model, num_head, dropout_rate)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = FeedForward(d_model, dim_ffn, dropout_rate)
+    
+    def forward(self, x:torch.Tensor, padding_mask:torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attention(self.norm1(x), padding_mask=padding_mask)
+        x = x + self.ffn(self.norm2(x))
+        
+        if padding_mask is not None:
+            x = x * padding_mask.unsqueeze(-1).to(x.dtype)
+        
+        return x
+
+
 
 
 class CausalTransformer(nn.Module):
@@ -44,6 +79,7 @@ class CausalTransformer(nn.Module):
         self.PAD_TOKEN = 0
         self._causal_mask_cache: dict[tuple[str, int], torch.Tensor] = {}
         self._rq_pos_cache: dict[tuple[str, int], torch.Tensor] = {}
+        self._item_pos_cache:dict[tuple[str, int], torch.Tensor] = {}
 
         self.user_emb = None
         if self.use_user_token:
@@ -65,21 +101,25 @@ class CausalTransformer(nn.Module):
         
         # Token Embedding   token 表示
         self.token_emb = nn.Embedding(vocab_size, d_model, padding_idx=0)
-        # Position Encoding  -> 区分每一个token
-        self.pos_enc = PositionEncoding(d_model, max_seq_len, dropout_rate)
-        # rq position encoding  -> 区分每一层
+        
+        # item序列位置，0 -> <BOS>， 1...max_seq_len -> 历史items
+        # max_seq_len+2 -> 防止compute_loss()计算时embedding出界
+        self.item_pos_emb = nn.Embedding(max_seq_len+2, d_model)
+        # rq position encoding  -> item内区分每一层
         self.rq_pos_emb = nn.Embedding(num_rq_layers, d_model)
         
+        self.input_dropout = nn.Dropout(dropout_rate)
+        
         # Transformer Decoder-only (Causal)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=num_head,
-            dim_feedforward=dim_ffn,
-            dropout=dropout_rate,
-            batch_first=True,
-            norm_first=True # pre-LayerNorm, 训练更稳定
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(
+                d_model=d_model,
+                num_head=num_head,
+                dim_ffn=dim_ffn,
+                dropout_rate=dropout_rate
+            ) for _ in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(d_model)
         
         # 输出头/投影头
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
@@ -99,9 +139,15 @@ class CausalTransformer(nn.Module):
                 if module.padding_idx is not None:
                     with torch.no_grad():
                         module.weight[module.padding_idx].zero_()
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+    
+    
     
     def _cache_key(self, device: torch.device, seq_len: int) -> tuple[str, int]:
         return (str(device), seq_len)
+    
 
     def _make_causal_mask(self, seq_len:int, device) -> torch.Tensor:
         """
@@ -116,8 +162,29 @@ class CausalTransformer(nn.Module):
             )
         return self._causal_mask_cache[cache_key]
         
+        
+    def _make_item_position_ids(self, seq_len:int, device) -> torch.Tensor:
+        """
+        为紧凑 token 序列生成 item 级位置编号
+        序列:
+            [BOS, i0_c0, i0_c1, i0_c2, i0_c3, i1_c0, i1_c1, ...]
+        item_pos:
+            [0,   1,     1,     1,     1,     2,     2,   ...]
+        """
+        cache_key = self._cache_key(device, seq_len)
+        if cache_key not in self._item_pos_cache:
+            if seq_len <= 0:
+                positions = torch.empty(0, dtype=torch.long, device=device)
+            else:
+                positions = torch.zeros(seq_len, dtype=torch.long, device=device)
+                if seq_len > 1:
+                    token_offsets = torch.arange(seq_len - 1, device=device)
+                    positions[1:] = token_offsets // self.num_rq_layers + 1
+            self._item_pos_cache[cache_key] = positions
+        return self._item_pos_cache[cache_key]
 
-    def _make_rq_position_ids(self, seq_len:int, device) -> torch.tensor:
+
+    def _make_rq_position_ids(self, seq_len:int, device) -> torch.Tensor:
         """
         生成层间 position embedding/ID -> 区分层间ID/位置
         序列:      [BOS, c0_item#0, c1_item#0, c2_item#0, c0_item#1, ...]
@@ -238,24 +305,32 @@ class CausalTransformer(nn.Module):
     ) -> torch.Tensor:
         _, seq_len = compact_ids.shape
         device = compact_ids.device
-
-        x = self.pos_enc(self.token_emb(compact_ids))
+        
+        x = self.token_emb(compact_ids)
+        
+        item_pos_id = self._make_item_position_ids(seq_len, device)
         rq_pos_id = self._make_rq_position_ids(seq_len, device)
-        x = x + self.rq_pos_emb(rq_pos_id).unsqueeze(0)
-
+        
+        x = (x + self.item_pos_emb(item_pos_id).unsqueeze(0)  
+                + self.rq_pos_emb(rq_pos_id).unsqueeze(0))
+        x = self.input_dropout(x)
+        
         if self.use_user_token:
             if user_ids is None:
                 raise ValueError("user_ids must be provided when use_user_token=True")
             x[:, 0, :] = x[:, 0, :] + self.user_emb(user_ids)
-
-        attn_mask = self._make_causal_mask(seq_len, device)
-        key_padding_mask = ~compact_mask.bool()
-
-        return self.transformer(
-            src=x,
-            mask=attn_mask,
-            src_key_padding_mask=key_padding_mask
-        )
+        
+        x = x * compact_mask.unsqueeze(-1).to(x.dtype)
+        
+        for block in self.blocks:
+            x = block(x, padding_mask=compact_mask)
+        
+        x = self.final_norm(x)
+        x = x * compact_mask.unsqueeze(-1).to(x.dtype)
+        return x
+        
+        
+        
 
     def _mask_invalid_code_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """
@@ -270,10 +345,10 @@ class CausalTransformer(nn.Module):
             logits[..., max_token:] = float("-inf")
         return logits
 
-    def forward(self, input_ids:torch.tensor,   # 输入序列: [B, T]
-                attention_mask: torch.tensor,    # 掩码M: [B, T]
+    def forward(self, input_ids:torch.Tensor,   # 输入序列: [B, T]
+                attention_mask: torch.Tensor,    # 掩码M: [B, T]
                 user_ids: torch.Tensor | None = None  # [B,]
-                )->torch.tensor:
+                )->torch.Tensor:
         """
         返回 logits [B, T, ,vocab_size]
         """
@@ -307,12 +382,17 @@ class CausalTransformer(nn.Module):
             torch.arange(hidden.size(0), device=hidden.device),
             last_indices
         ]
-        return self.lm_head(last_hidden)
+        
+        logits = self.lm_head(last_hidden)
+        logits = self._mask_invalid_code_logits(logits)
+        
+        return logits
     
-    def compute_loss(self,input_ids: torch.tensor,  # [B, T]
-                     attention_mask:torch.tensor,   # [B, T]
-                     target_ids:torch.tensor,   # [B, L] 下一个item(目标)的语义ID
-                     user_ids: torch.tensor
+    
+    def compute_loss(self,input_ids: torch.Tensor,  # [B, T]
+                     attention_mask:torch.Tensor,   # [B, T]
+                     target_ids:torch.Tensor,   # [B, L] 下一个item(目标)的语义ID
+                     user_ids: torch.Tensor
                      )->dict:
         """
         Teacher forcing 训练损失
@@ -335,6 +415,7 @@ class CausalTransformer(nn.Module):
         logits = self(train_input_ids, train_attention_mask, user_ids)    # [B, T+L-1, vocab_size]
 
         pred_logits = logits[:, -L:, :]    # [B, L, vocab_size]
+        pred_logits = self._mask_invalid_code_logits(pred_logits)
         
         per_token_loss = F.cross_entropy(
             pred_logits.reshape(-1, self.vocab_size),   # [B*L, vocab_size]
