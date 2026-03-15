@@ -16,10 +16,10 @@ from models.Transformer import CausalTransformer
 CONFIG = {
     # 数据路径
     "data_path":       "datasets/processed/beauty.pkl",
-    "sid_path":        "datasets/processed/semantic_ids_rkmeans.npy",
+    "sid_path":        "datasets/processed/semantic_ids.npy",
     "output_dir":      "checkpoints/rec",
     "save_every":      1,    # 每多少个 epoch 保存一次 latest ckpt
-    "resume":          True, # 如有 latest.ckpt 自动断点续训
+    "resume":          False, # 如有 latest.ckpt 自动断点续训
     "every_epoch":     5,
 
     # 模型超参数
