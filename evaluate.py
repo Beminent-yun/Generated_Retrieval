@@ -211,24 +211,12 @@ def move_branch_tables_to_device(
 def build_dynamic_beam_schedule(max_beam_size: int, num_steps: int) -> List[int]:
     """
     默认动态 beam schedule：
-    - L=4, beam=20 -> [20, 10, 4, 1]
-    - L=4, beam=10 -> [10, 5, 2, 1]
+    - L=4, beam=20 -> [20, 20, 20, 20]
+    - L=4, beam=10 -> [10, 10, 10, 10]
     """
     if num_steps <= 0:
         return []
-    if num_steps == 1:
-        return [max(1, max_beam_size)]
-
-    schedule = [max(1, max_beam_size)]
-    for step in range(1, num_steps - 1):
-        progress = step / (num_steps - 1)
-        value = int(max_beam_size * ((1.0 - progress) ** 1.5))
-        schedule.append(max(1, value))
-    schedule.append(1)
-
-    for idx in range(1, len(schedule)):
-        schedule[idx] = min(schedule[idx - 1], schedule[idx])
-    return schedule
+    return [max(1, max_beam_size)] * num_steps
 
 
 def normalize_beam_schedule(
@@ -245,17 +233,10 @@ def normalize_beam_schedule(
         )
 
     normalized = [max(1, min(beam_size, int(v))) for v in beam_schedule]
-    normalized[0] = min(normalized[0], beam_size)
-    normalized[-1] = 1
     for idx in range(1, len(normalized)):
         normalized[idx] = min(normalized[idx - 1], normalized[idx])
     return normalized
 
-
-def resolve_eval_amp_settings(device: str) -> tuple[bool, torch.dtype | None]:
-    if device == "cuda" and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
-        return True, torch.bfloat16
-    return False, None
 
 
 @torch.inference_mode()
