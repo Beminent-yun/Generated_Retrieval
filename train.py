@@ -240,13 +240,15 @@ def train_one_epoch(
     amp_enabled: bool = False,
     amp_dtype: torch.dtype | None = None,
     scaler: torch.amp.GradScaler | None = None,
-)->tuple[float, float]:
+)->dict[str, float | list[float]]:
     """
     训练一个epoch, 返回平均loss
     """
     model.train()
     total_loss = 0.0
-    total_acc = 0.0
+    total_exact_acc = 0.0
+    total_token_acc = 0.0
+    total_layer_acc = torch.zeros(model.num_rq_layers, dtype=torch.float64)
     num_batches = len(loader)
     autocast_device_type = "cuda" if device == "cuda" else "cpu"
     
@@ -267,7 +269,9 @@ def train_one_epoch(
         ):
             outputs = model.compute_loss(input_ids, attention_mask, target_ids, user_ids)
             loss = outputs["loss"]
-            acc = outputs["acc"]
+            exact_acc = outputs["exact_acc"]
+            token_acc = outputs["token_acc"]
+            layer_acc = outputs["layer_acc"]
         
         # backward
         if scaler is not None and scaler.is_enabled():
@@ -283,11 +287,23 @@ def train_one_epoch(
             optimizer.step()
         
         total_loss += loss.item()
-        total_acc += acc.item()
+        total_exact_acc += exact_acc.item()
+        total_token_acc += token_acc.item()
+        total_layer_acc += layer_acc.detach().to("cpu", dtype=torch.float64)
         
-        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{acc.item():.4f}'})
+        pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'exact_acc': f'{exact_acc.item():.4f}',
+            'token_acc': f'{token_acc.item():.4f}',
+        })
         
-    return total_loss / num_batches, total_acc / num_batches
+    avg_layer_acc = (total_layer_acc / num_batches).tolist()
+    return {
+        "loss": total_loss / num_batches,
+        "exact_acc": total_exact_acc / num_batches,
+        "token_acc": total_token_acc / num_batches,
+        "layer_acc": avg_layer_acc,
+    }
 
 
 def build_timestamped_ckpt_path(output_dir: Path, prefix: str, epoch: int) -> Path:
@@ -462,7 +478,7 @@ def train_rec(config:dict = CONFIG):
         print(f"Epoch {epoch:3d} train_samples={train_num_samples}")
         
         # 训练一个epoch
-        train_loss, train_acc = train_one_epoch(
+        train_metrics = train_one_epoch(
             model,
             train_loader,
             optimizer,
@@ -472,6 +488,10 @@ def train_rec(config:dict = CONFIG):
             amp_dtype=amp_dtype,
             scaler=scaler,
         )
+        train_loss = float(train_metrics["loss"])
+        train_exact_acc = float(train_metrics["exact_acc"])
+        train_token_acc = float(train_metrics["token_acc"])
+        train_layer_acc = [float(v) for v in train_metrics["layer_acc"]]
         
         if epoch % config['every_epoch'] == 0 or epoch == config['epochs']:
             eval_start = time.perf_counter()
@@ -489,14 +509,24 @@ def train_rec(config:dict = CONFIG):
             )
             eval_time = time.perf_counter() - eval_start
             
-            print(f"\nEpoch: {epoch:3d}/{config['epochs']} lr={current_lr:.2e} loss={train_loss:.4f} acc={train_acc:.4f}")
+            print(
+                f"\nEpoch: {epoch:3d}/{config['epochs']} lr={current_lr:.2e} "
+                f"loss={train_loss:.4f} exact_acc={train_exact_acc:.4f} token_acc={train_token_acc:.4f}"
+            )
+            print(
+                "Train layer_acc="
+                + ", ".join(f"c{idx}={value:.4f}" for idx, value in enumerate(train_layer_acc))
+            )
             print_metrics(val_metrics, train_eval_topk, prefix='Val')
             print(f"Val decode_time={eval_time:.2f}s")
             
             history.append({
                 'epoch': epoch,
                 'train_loss': train_loss,
-                'train_acc': train_acc,
+                'train_acc': train_exact_acc,
+                'train_exact_acc': train_exact_acc,
+                'train_token_acc': train_token_acc,
+                'train_layer_acc': train_layer_acc,
                 'train_num_samples': train_num_samples,
                 'lr': current_lr,
                 'amp_enabled': amp_enabled,
@@ -507,16 +537,21 @@ def train_rec(config:dict = CONFIG):
             })
 
             # SwanLab 记录
-            swanlab.log({
+            train_log_payload = {
                 'train/loss': train_loss,
-                'train/acc': train_acc,
+                'train/acc': train_exact_acc,
+                'train/exact_acc': train_exact_acc,
+                'train/token_acc': train_token_acc,
                 'train/lr': current_lr,
                 'train/num_samples': train_num_samples,
                 'train/amp_enabled': float(amp_enabled),
                 'train/grad_scaler_enabled': float(scaler.is_enabled()),
                 'val/decode_time_sec': eval_time,
                 **{f'val/{k}': v for k, v in val_metrics.items()}
-            }, step=epoch)
+            }
+            for idx, value in enumerate(train_layer_acc):
+                train_log_payload[f'train/layer_acc_c{idx}'] = value
+            swanlab.log(train_log_payload, step=epoch)
             
             # Check Early Stopping
             val_ndcg = val_metrics[f"NDCG@{monitor_k}"]
@@ -565,15 +600,24 @@ def train_rec(config:dict = CONFIG):
                 print(f"Saved latest snapshot to {latest_snapshot_path}")
         else:
             # 非评估轮次只打印 loss
-            swanlab.log({
+            train_log_payload = {
                 'train/loss': train_loss,
-                'train/acc': train_acc,
+                'train/acc': train_exact_acc,
+                'train/exact_acc': train_exact_acc,
+                'train/token_acc': train_token_acc,
                 'train/lr': current_lr,
                 'train/num_samples': train_num_samples,
                 'train/amp_enabled': float(amp_enabled),
                 'train/grad_scaler_enabled': float(scaler.is_enabled()),
-            }, step=epoch)
-            print(f"Epoch {epoch:3d} | loss={train_loss:.4f} acc={train_acc:.4f} samples={train_num_samples} | (skip eval)")
+            }
+            for idx, value in enumerate(train_layer_acc):
+                train_log_payload[f'train/layer_acc_c{idx}'] = value
+            swanlab.log(train_log_payload, step=epoch)
+            print(
+                f"Epoch {epoch:3d} | loss={train_loss:.4f} "
+                f"exact_acc={train_exact_acc:.4f} token_acc={train_token_acc:.4f} "
+                f"samples={train_num_samples} | (skip eval)"
+            )
     
     print("Start Evaluating..")
     eval_ckpt_path = best_ckpt_path if best_ckpt_path.exists() else latest_ckpt_path if latest_ckpt_path.exists() else None

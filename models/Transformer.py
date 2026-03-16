@@ -426,12 +426,18 @@ class CausalTransformer(nn.Module):
         weights = self.target_loss_weights.view(1, L)
         loss = (per_token_loss * weights).sum() / (target_ids.size(0) * weights.sum())
         
-        # Compute Accuracy
+        # Compute accuracy metrics at different granularities.
         pred_ids = pred_logits.argmax(-1)   # [B, L]
-        acc = (pred_ids == target_ids).all(dim=1).float().mean()
+        token_matches = (pred_ids == target_ids).float()
+        exact_acc = token_matches.all(dim=1).float().mean()
+        token_acc = token_matches.mean()
+        layer_acc = token_matches.mean(dim=0)
         
         return {
             "loss": loss,
-            "acc": acc
+            "acc": exact_acc,
+            "exact_acc": exact_acc,
+            "token_acc": token_acc,
+            "layer_acc": layer_acc,
         }
         
