@@ -2,6 +2,7 @@ import os
 import json
 import pickle
 import time
+import argparse
 from pathlib import Path
 import torch
 import numpy as np
@@ -9,7 +10,7 @@ import swanlab
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 from Amazon_Dataset import get_rec_loaders
-from evaluate import build_sid_to_item, evaluate, print_metrics
+from evaluate import build_sid_to_item, build_sid_to_item_tables, evaluate, print_metrics
 from models.Transformer import CausalTransformer
 
 
@@ -62,6 +63,63 @@ CONFIG = {
     'num_workers':      os.cpu_count(),
     'seed':             42
 }
+
+
+def parse_bool_arg(value: str | bool | None) -> bool | None:
+    if value is None or isinstance(value, bool):
+        return value
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value from: {value}")
+
+
+def parse_int_list_arg(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    values = [int(x.strip()) for x in value.split(",") if x.strip()]
+    return values if values else None
+
+
+def build_train_config_from_cli(base_config: dict) -> dict:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", type=str, default=None, help="Override resume flag: true/false")
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--every_epoch", type=int, default=None)
+    parser.add_argument("--beam_size", type=int, default=None)
+    parser.add_argument("--train_eval_beam_size", type=int, default=None)
+    parser.add_argument("--beam_schedule", type=str, default=None, help="comma-separated beam schedule")
+    parser.add_argument("--train_eval_beam_schedule", type=str, default=None, help="comma-separated train-eval beam schedule")
+    args = parser.parse_args()
+
+    config = dict(base_config)
+
+    if args.resume is not None:
+        config["resume"] = parse_bool_arg(args.resume)
+    if args.output_dir is not None:
+        config["output_dir"] = args.output_dir
+    if args.epochs is not None:
+        config["epochs"] = args.epochs
+    if args.every_epoch is not None:
+        config["every_epoch"] = args.every_epoch
+    if args.beam_size is not None:
+        config["beam_size"] = args.beam_size
+    if args.train_eval_beam_size is not None:
+        config["train_eval_beam_size"] = args.train_eval_beam_size
+
+    beam_schedule = parse_int_list_arg(args.beam_schedule)
+    if beam_schedule is not None:
+        config["beam_schedule"] = beam_schedule
+
+    train_eval_beam_schedule = parse_int_list_arg(args.train_eval_beam_schedule)
+    if train_eval_beam_schedule is not None:
+        config["train_eval_beam_schedule"] = train_eval_beam_schedule
+
+    return config
 
 
 def print_parameter_summary(model:torch.nn.Module) -> None:
@@ -286,6 +344,7 @@ def train_rec(config:dict = CONFIG):
         target_loss_weights = [1.0] * num_rq_layers
 
     sid2item = build_sid_to_item(semantic_ids)
+    sid2item_single, sid2item_multi = build_sid_to_item_tables(semantic_ids)
     
     print("Building Dataloader")
     train_loader, val_loader, test_loader, vocab_size = get_rec_loaders(
@@ -420,6 +479,8 @@ def train_rec(config:dict = CONFIG):
                 model=model,
                 loader=val_loader,
                 sid2item=sid2item,
+                sid2item_single=sid2item_single,
+                sid2item_multi=sid2item_multi,
                 topk=train_eval_topk,
                 beam_size=config.get('train_eval_beam_size', config['beam_size']),
                 device=device,
@@ -530,6 +591,8 @@ def train_rec(config:dict = CONFIG):
         model=model,
         loader=test_loader,
         sid2item=sid2item,
+        sid2item_single=sid2item_single,
+        sid2item_multi=sid2item_multi,
         topk=config['topk'],
         beam_size=config['beam_size'],
         device=device,
@@ -560,7 +623,7 @@ def train_rec(config:dict = CONFIG):
     return model, test_metrics
 
 if __name__ == "__main__":
-    train_rec()
+    train_rec(build_train_config_from_cli(CONFIG))
     
     
         
