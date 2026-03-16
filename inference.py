@@ -7,6 +7,7 @@ from evaluate import (
     beam_to_candidate,
     build_prefix_branch_tables,
     build_sid_to_item,
+    build_sid_to_item_tables,
     generate_beam_constrained,
     move_branch_tables_to_device
 )
@@ -85,9 +86,10 @@ def load_model_and_tables(checkpoint_path: str, device:str):
     model.eval()
     
     sid2item = build_sid_to_item(semantic_ids)
+    sid2item_single, sid2item_multi = build_sid_to_item_tables(semantic_ids)
+
     allowed_tokens, next_states, branch_masks = build_prefix_branch_tables(
         sid2item,
-        vocab_size=model.vocab_size,
         code_offset=model.CODE_OFFSET
     )
     allowed_tokens, next_states, branch_masks = move_branch_tables_to_device(
@@ -97,15 +99,26 @@ def load_model_and_tables(checkpoint_path: str, device:str):
         torch.device(device)
     )
     
-    return model, config, semantic_ids, sid2item, allowed_tokens, next_states, branch_masks
+    return (
+        model,
+        config,
+        semantic_ids,
+        sid2item,
+        sid2item_single,
+        sid2item_multi,
+        allowed_tokens,
+        next_states,
+        branch_masks,
+    )
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def recommend_next_items(
     model: CausalTransformer,
     history_items: list[int],
     semantic_ids: np.ndarray,
-    sid2item,
+    sid2item_single,
+    sid2item_multi,
     allowed_tokens,
     next_states,
     branch_masks,
@@ -141,9 +154,11 @@ def recommend_next_items(
     
     candidates = beam_to_candidate(
         beams=beams,
-        sid2item=sid2item,
+        sid2item_single=sid2item_single,
+        sid2item_multi=sid2item_multi,
         code_offset=model.CODE_OFFSET
     )[0]
+
     
     return candidates, beams[0]
 
@@ -159,7 +174,17 @@ def main():
     
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     
-    model, config, semantic_ids, sid2item, allowed_tokens, next_states, branch_masks = load_model_and_tables(
+    (
+        model,
+        config,
+        semantic_ids,
+        sid2item,
+        sid2item_single,
+        sid2item_multi,
+        allowed_tokens,
+        next_states,
+        branch_masks,
+    ) = load_model_and_tables(
         args.checkpoint,
         device
     )
@@ -169,7 +194,8 @@ def main():
         model=model,
         history_items=history_items,
         semantic_ids=semantic_ids,
-        sid2item=sid2item,
+        sid2item_single=sid2item_single,
+        sid2item_multi=sid2item_multi,
         allowed_tokens=allowed_tokens,
         next_states=next_states,
         branch_masks=branch_masks,
