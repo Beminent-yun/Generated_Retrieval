@@ -339,6 +339,11 @@ def generate_beam_constrained(
 
     return beams
 
+def resolve_eval_amp_settings(device: str) -> tuple[bool, torch.dtype | None]:
+    if device == "cuda" and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        return True, torch.bfloat16
+    return False, None
+
 
 @torch.inference_mode()
 def evaluate(
