@@ -44,6 +44,15 @@ def calculate_metrics(
     return metrics
 
 
+def parse_int_list(arg: str | None) -> list[int] | None:
+    if arg is None:
+        return None
+    values = [int(x.strip()) for x in arg.split(",") if x.strip()]
+    return values if values else None
+
+
+
+
 def print_metrics(
     metrics:Dict[str, float],
     topk: List[int],
@@ -130,7 +139,6 @@ def build_prefix_to_next_tokens(
 
 def build_prefix_branch_tables(
     sid2item: Dict[tuple, List[int]],
-    vocab_size: int,
     code_offset: int = 3
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
     """
@@ -525,6 +533,12 @@ def main():
     parser.add_argument('--num_workers', type=int, default=None)
     parser.add_argument('--print_hit_samples', type=int, default=0,
                         help='打印命中样本的详细信息，0表示不打印')
+    
+    parser.add_argument('--topk', type=str, default=None,
+                    help='comma-separated topk, e.g. 1,5,10')
+    parser.add_argument('--beam_schedule', type=str, default=None,
+                        help='comma-separated beam schedule, e.g. 10,10,10,10')
+    
     args = parser.parse_args()
     
     # 加载checkpoint
@@ -562,6 +576,18 @@ def main():
     eval_num_workers = args.num_workers if args.num_workers is not None else config['num_workers']
     eval_beam_size = args.beam_size if args.beam_size is not None else config.get('beam_size', 20)
 
+    eval_topk = parse_int_list(args.topk) if args.topk is not None else config['topk']
+    eval_beam_schedule = (
+        parse_int_list(args.beam_schedule)
+        if args.beam_schedule is not None
+        else (
+            config.get('beam_schedule')
+            if eval_beam_size == config.get('beam_size', eval_beam_size)
+            else None
+        )
+    )
+
+
     _, val_loader, test_loader, vocab_size = get_rec_loaders(
         data=data,
         semantic_ids=semantic_ids,
@@ -598,20 +624,17 @@ def main():
         model=model,
         loader=loader,
         sid2item=sid2item,
-        topk=config['topk'],
+        topk=eval_topk,
         beam_size=eval_beam_size,
         device=device,
-        beam_schedule=(
-            config.get('beam_schedule')
-            if eval_beam_size == config.get('beam_size', eval_beam_size)
-            else None
-        ),
+        beam_schedule=eval_beam_schedule,
         split=args.split.capitalize(),
         print_hit_samples=args.print_hit_samples
     )
-    
+
     print(f"\n{args.split.capitalize()} 结果：")
-    print_metrics(metrics, config['topk'])
+    print_metrics(metrics, eval_topk)
+
     
 
 if __name__ == "__main__":
